@@ -1,140 +1,44 @@
 #include "heater_control.h"
 
-#include "ch.h"
-#include "hal.h"
-
-#include "port.h"
 #include "fault.h"
-#include "pwm.h"
 #include "sampling.h"
-#include "pid.h"
-
-struct sensorHeaterParams {
-    float targetTemp;
-    float targetESR;
-};
-
-static const struct sensorHeaterParams heaterParams49 = {
-    .targetTemp = 780,
-    .targetESR = 300,
-};
-
-static const struct sensorHeaterParams heaterParams42 = {
-    .targetTemp = 730,
-    .targetESR = 80,
-};
-
-static const struct sensorHeaterParams heaterParamsAdv = {
-    .targetTemp = 785,
-    .targetESR = 300,
-};
-
-static const sensorHeaterParams *getHeaterParams(SensorType type) {
-    switch (type) {
-        case SensorType::LSU42:
-            return &heaterParams42;
-        case SensorType::LSUADV:
-            return &heaterParamsAdv;
-        case SensorType::LSU49:
-        default:
-            return &heaterParams49;
-    }
-}
 
 using namespace wbo;
 
-// 400khz / 1024 = 390hz PWM
-static Pwm heaterPwm(HEATER_PWM_DEVICE);
-static const PWMConfig heaterPwmConfig = {
-    .frequency = 400'000,
-    .period = 1024,
-    .callback = nullptr,
-    .channels = {
-        {PWM_OUTPUT_ACTIVE_HIGH, nullptr},
-        {PWM_OUTPUT_ACTIVE_HIGH, nullptr},
-        {PWM_OUTPUT_ACTIVE_HIGH, nullptr},
-        {PWM_OUTPUT_ACTIVE_HIGH, nullptr}
-    },
-    .cr2 = 0,
-#if STM32_PWM_USE_ADVANCED
-    .bdtr = 0,
-#endif
-    .dier = 0
-};
-
-static constexpr int preheatTimeCounter = HEATER_PREHEAT_TIME / HEATER_CONTROL_PERIOD;
-static constexpr int batteryStabTimeCounter = HEATER_BATTERY_STAB_TIME / HEATER_CONTROL_PERIOD;
-static const struct sensorHeaterParams *heater;
-
-class HeaterController : public IHeaterController
+HeaterControllerBase::HeaterControllerBase(int ch, int preheatTimeSec, int warmupTimeSec)
+    : ch(ch)
+    , m_preheatTimeSec(preheatTimeSec)
+    , m_warmupTimeSec(warmupTimeSec)
 {
-public:
-    HeaterController(int ch, int pwm_ch)
-        : ch(ch), pwm_ch(pwm_ch)
-    {
-    }
-
-    void Update(const ISampler& sampler, HeaterAllow heaterAllowState) override;
-
-    bool IsRunningClosedLoop() const override
-    {
-        return heaterState == HeaterState::ClosedLoop;
-    }
-
-    float GetHeaterEffectiveVoltage() const override
-    {
-        return heaterVoltage;
-    }
-
-    HeaterState GetHeaterState() const override
-    {
-        return heaterState;
-    }
-
-protected:
-    HeaterState GetNextState(HeaterAllow haeterAllowState, float batteryVoltage, float sensorTemp);
-    float GetVoltageForState(float heaterEsr);
-
-private:
-    Pid heaterPid =
-        {
-            0.3f,      // kP
-            0.3f,      // kI
-            0.01f,     // kD
-            3.0f,      // Integrator clamp (volts)
-            HEATER_CONTROL_PERIOD
-        };
-
-    int timeCounter = preheatTimeCounter;
-    int batteryStabTime = batteryStabTimeCounter;
-    float rampVoltage = 0;
-    float heaterVoltage = 0;
-    HeaterState heaterState = HeaterState::Preheat;
-#ifdef HEATER_MAX_DUTY
-    int cycle;
-#endif
-
-// TODO: private:
-public:
-    const uint8_t ch;
-    const uint8_t pwm_ch;
-};
-
-HeaterController heaterControllers[AFR_CHANNELS] =
-{
-    { 0, HEATER_PWM_CHANNEL_0 },
-
-#if AFR_CHANNELS >= 2
-    { 1, HEATER_PWM_CHANNEL_1 }
-#endif
-};
-
-const IHeaterController& GetHeaterController(int ch)
-{
-    return heaterControllers[ch];
 }
 
-HeaterState HeaterController::GetNextState(HeaterAllow heaterAllowState, float batteryVoltage, float sensorTemp)
+void HeaterControllerBase::Configure(float targetTempC, float targetEsr)
+{
+    m_targetTempC = targetTempC;
+    m_targetEsr = targetEsr;
+
+    m_preheatTimer.reset();
+    m_warmupTimer.reset();
+    m_heaterStableTimer.reset();
+    m_closedLoopStableTimer.reset();
+}
+
+bool HeaterControllerBase::IsRunningClosedLoop() const
+{
+    return heaterState == HeaterState::ClosedLoop;
+}
+
+float HeaterControllerBase::GetHeaterEffectiveVoltage() const
+{
+    return heaterVoltage;
+}
+
+HeaterState HeaterControllerBase::GetHeaterState() const
+{
+    return heaterState;
+}
+
+HeaterState HeaterControllerBase::GetNextState(HeaterState currentState, HeaterAllow heaterAllowState, float heaterSupplyVoltage, float sensorTemp)
 {
     bool heaterAllowed = heaterAllowState == HeaterAllow::Allowed;
 
@@ -142,43 +46,55 @@ HeaterState HeaterController::GetNextState(HeaterAllow heaterAllowState, float b
     if (heaterAllowState == HeaterAllow::Unknown)
     {
         // measured voltage too low to auto-start heating
-        if (batteryVoltage < HEATER_BATTETY_OFF_VOLTAGE)
+        if (heaterSupplyVoltage < HEATER_SUPPLY_OFF_VOLTAGE)
         {
-            batteryStabTime = batteryStabTimeCounter;
+            m_heaterStableTimer.reset();
+            // set fault
+            SetFault(ch, Fault::SensorNoHeatSupply);
+            return HeaterState::NoHeaterSupply;
         }
-        // measured voltage is high enougth to auto-start heating, wait some time to stabilize
-        if ((batteryVoltage > HEATER_BATTERY_ON_VOLTAGE) && (batteryStabTime > 0))
+        else if (heaterSupplyVoltage > HEATER_SUPPLY_ON_VOLTAGE)
         {
-            batteryStabTime--;
+            // measured voltage is high enougth to auto-start heating, wait some time to stabilize
+            heaterAllowed = m_heaterStableTimer.hasElapsedSec(HEATER_BATTERY_STAB_TIME);
         }
-        heaterAllowed = batteryStabTime == 0;
     }
 
     if (!heaterAllowed)
     {
         // ECU hasn't allowed preheat yet, reset timer, and force preheat state
-        timeCounter = preheatTimeCounter;
+        m_preheatTimer.reset();
         return HeaterState::Preheat;
     }
 
-    float overheatTemp = heater->targetTemp + 100;
-    float closedLoopTemp = heater->targetTemp - 50;
-    float underheatTemp = heater->targetTemp - 100;
+    float overheatTemp = m_targetTempC + 100;
+    float closedLoopTemp = m_targetTempC - 30;
+    float underheatTemp = m_targetTempC - 100;
 
-    switch (heaterState)
+    switch (currentState)
     {
         case HeaterState::Preheat:
-            timeCounter--;
+            #ifdef HEATER_FAST_HEATING_THRESHOLD_T
+            if (sensorTemp >= HEATER_FAST_HEATING_THRESHOLD_T) {
+                // if sensor is already hot - we can start from higher heater voltage
+                rampVoltage = 9;
+
+                // Reset the timer for the warmup phase
+                m_warmupTimer.reset();
+
+                return HeaterState::WarmupRamp;
+            }
+            #endif
 
             // If preheat timeout, or sensor is already hot (engine running?)
-            if (timeCounter <= 0 || sensorTemp > closedLoopTemp)
+            if (m_preheatTimer.hasElapsedSec(m_preheatTimeSec) || sensorTemp > closedLoopTemp)
             {
                 // If enough time has elapsed, start the ramp
-                // Start the ramp at 4 volts
-                rampVoltage = 4;
+                // Start the ramp at 7 volts
+                rampVoltage = 7;
 
-                // Next phase times out at 15 seconds
-                timeCounter = HEATER_WARMUP_TIMEOUT / HEATER_CONTROL_PERIOD;
+                // Reset the timer for the warmup phase
+                m_warmupTimer.reset();
 
                 return HeaterState::WarmupRamp;
             }
@@ -188,52 +104,72 @@ HeaterState HeaterController::GetNextState(HeaterAllow heaterAllowState, float b
         case HeaterState::WarmupRamp:
             if (sensorTemp > closedLoopTemp)
             {
+                m_closedLoopStableTimer.reset();
                 return HeaterState::ClosedLoop;
             }
-            else if (timeCounter == 0)
+            else if (m_warmupTimer.hasElapsedSec(m_warmupTimeSec))
             {
                 SetFault(ch, Fault::SensorDidntHeat);
+                // retry after timeout
+                m_retryTime = HEATER_DIDNOTHEAT_RETRY_TIMEOUT;
+                m_retryTimer.reset();
                 return HeaterState::Stopped;
             }
-
-            timeCounter--;
 
             break;
         case HeaterState::ClosedLoop:
-            // Check that the sensor's ESR is acceptable for normal operation
-            if (sensorTemp > overheatTemp)
-            {
-                SetFault(ch, Fault::SensorOverheat);
-                return HeaterState::Stopped;
+            if (m_closedLoopStableTimer.hasElapsedSec(HEATER_CLOSED_LOOP_STAB_TIME)) {
+                // Check that the sensor's ESR is acceptable for normal operation
+                if (sensorTemp > overheatTemp)
+                {
+                    SetFault(ch, Fault::SensorOverheat);
+                    // retry after timeout
+                    m_retryTime = HEATER_OVERHEAT_RETRY_TIMEOUT;
+                    m_retryTimer.reset();
+                    return HeaterState::Stopped;
+                }
+                else if (sensorTemp < underheatTemp)
+                {
+                    SetFault(ch, Fault::SensorUnderheat);
+                    // retry after timeout
+                    m_retryTime = HEATER_UNDERHEAT_RETRY_TIMEOUT;
+                    m_retryTimer.reset();
+                    return HeaterState::Stopped;
+                }
+            } else {
+                // give some time for stabilization...
+                // looks like heavy ramped Ipump affects sensorTemp measure
+                // and right after switch to closed loop sensorTemp drops below underhead threshold
             }
-            else if (sensorTemp < underheatTemp)
-            {
-                SetFault(ch, Fault::SensorUnderheat);
-                return HeaterState::Stopped;
-            }
+            // reset fault
+            SetFault(ch, Fault::None);
 
             break;
         case HeaterState::Stopped:
+            if ((m_retryTime) && (m_retryTimer.hasElapsedSec(m_retryTime))) {
+                return HeaterState::Preheat;
+            }
+            break;
         case HeaterState::NoHeaterSupply:
             /* nop */
             break;
     }
 
-    return heaterState;
+    return currentState;
 }
 
-float HeaterController::GetVoltageForState(float heaterEsr)
+float HeaterControllerBase::GetVoltageForState(HeaterState state, float sensorEsr)
 {
-    switch (heaterState)
+    switch (state)
     {
         case HeaterState::Preheat:
             // Max allowed during condensation phase (preheat) is 2v
-            return 1.5f;
+            return 2.0f;
         case HeaterState::WarmupRamp:
-            if (rampVoltage < 10)
+            if (rampVoltage < 12)
             {
-                // 0.3 volt per second, divided by battery voltage and update rate
-                constexpr float rampRateVoltPerSecond = 0.3f;
+                // 0.4 volt per second, divided by battery voltage and update rate
+                constexpr float rampRateVoltPerSecond = 0.4f;
                 constexpr float heaterFrequency = 1000.0f / HEATER_CONTROL_PERIOD;
                 rampVoltage += (rampRateVoltPerSecond / heaterFrequency);
             }
@@ -244,9 +180,12 @@ float HeaterController::GetVoltageForState(float heaterEsr)
             // Negated because lower resistance -> hotter
 
             // TODO: heater PID should operate on temperature, not ESR
-            return 7.5f - heaterPid.GetOutput(heater->targetESR, heaterEsr);
+            return 7.5f - heaterPid.GetOutput(m_targetEsr, sensorEsr);
         case HeaterState::Stopped:
             // Something has gone wrong, turn off the heater.
+            return 0;
+        case HeaterState::NoHeaterSupply:
+            // No/too low heater supply - disable output
             return 0;
     }
 
@@ -254,29 +193,31 @@ float HeaterController::GetVoltageForState(float heaterEsr)
     return 0;
 }
 
-void HeaterController::Update(const ISampler& sampler, HeaterAllow heaterAllowState)
+void HeaterControllerBase::Update(const ISampler& sampler, HeaterAllow heaterAllowState)
 {
     // Read sensor state
-    float heaterEsr = sampler.GetSensorInternalResistance();
+    float sensorEsr = sampler.GetSensorInternalResistance();
     float sensorTemperature = sampler.GetSensorTemperature();
 
-    // If we haven't heard from the ECU, use the internally sensed
-    // battery voltage instead of voltage over CAN.
-    float batteryVoltage = heaterAllowState == HeaterAllow::Unknown
-                                ? sampler.GetInternalBatteryVoltage()
-                                : GetRemoteBatteryVoltage();
+    #ifdef HEATER_INPUT_DIVIDER
+        // if board has ability to measure heater supply localy - use it
+        float heaterSupplyVoltage = sampler.GetInternalHeaterVoltage();
+    #else
+        // this board rely on measured voltage from ECU
+        float heaterSupplyVoltage = GetRemoteBatteryVoltage();
+    #endif
 
     // Run the state machine
-    heaterState = GetNextState(heaterAllowState, batteryVoltage, sensorTemperature);
-    float heaterVoltage = GetVoltageForState(heaterEsr);
+    heaterState = GetNextState(heaterState, heaterAllowState, heaterSupplyVoltage, sensorTemperature);
+    float heaterVoltage = GetVoltageForState(heaterState, sensorEsr);
 
-    // Limit to 11 volts
-    if (heaterVoltage > 11) {
-        heaterVoltage = 11;
+    // Limit to 12 volts
+    if (heaterVoltage > 12) {
+        heaterVoltage = 12;
     }
 
     // duty = (V_eff / V_batt) ^ 2
-    float voltageRatio = heaterVoltage / batteryVoltage;
+    float voltageRatio = (heaterSupplyVoltage < 1.0f) ? 0 : heaterVoltage / heaterSupplyVoltage;
     float duty = voltageRatio * voltageRatio;
 
     #ifdef HEATER_MAX_DUTY
@@ -289,65 +230,14 @@ void HeaterController::Update(const ISampler& sampler, HeaterAllow heaterAllowSt
     }
     #endif
 
-    if (batteryVoltage >= 23)
+    if (heaterSupplyVoltage >= 23)
     {
         duty = 0;
         heaterVoltage = 0;
     }
+
     // Pipe the output to the heater driver
-    heaterPwm.SetDuty(pwm_ch, duty);
-    heaterVoltage = heaterVoltage;
-}
-
-static THD_WORKING_AREA(waHeaterThread, 256);
-static void HeaterThread(void*)
-{
-    int i;
-
-    chRegSetThreadName("Heater");
-
-    // Wait for temperature sensing to stabilize so we don't
-    // immediately think we overshot the target temperature
-    chThdSleepMilliseconds(1000);
-
-    // Get sensor type and settings
-    heater = getHeaterParams(GetSensorType());
-
-    while (true)
-    {
-        auto heaterAllowState = GetHeaterAllowed();
-
-        for (i = 0; i < AFR_CHANNELS; i++) {
-            const auto& sampler = GetSampler(i);
-            auto& heater = heaterControllers[i];
-
-            heater.Update(sampler, heaterAllowState);
-        }
-
-        // Loop at ~20hz
-        chThdSleepMilliseconds(HEATER_CONTROL_PERIOD);
-    }
-}
-
-void StartHeaterControl()
-{
-    heaterPwm.Start(heaterPwmConfig);
-    heaterPwm.SetDuty(heaterControllers[0].pwm_ch, 0);
-#if (AFR_CHANNELS > 1)
-    heaterPwm.SetDuty(heaterControllers[1].pwm_ch, 0);
-#endif
-
-    chThdCreateStatic(waHeaterThread, sizeof(waHeaterThread), NORMALPRIO + 1, HeaterThread, nullptr);
-}
-
-float GetHeaterDuty(int ch)
-{
-    return heaterPwm.GetLastDuty(heaterControllers[ch].pwm_ch);
-}
-
-HeaterState GetHeaterState(int ch)
-{
-    return heaterControllers[ch].GetHeaterState();
+    SetDuty(duty);
 }
 
 const char* describeHeaterState(HeaterState state)

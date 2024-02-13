@@ -1,6 +1,8 @@
 #pragma once
 
-#include "hal.h"
+#include <cstdint>
+#include <cstddef>
+
 #include "port_shared.h"
 #include "wideband_config.h"
 
@@ -10,13 +12,16 @@ struct AnalogChannelResult
     float PumpCurrentVoltage;
     /* for dual version - this is voltage on Heater-, switches between zero and Vbatt with heater PWM,
         * used for both Vbatt measurement and Heater diagnostic */
-    float BatteryVoltage;
+    float HeaterSupplyVoltage;
+    /* If measured voltage is too close to ground or Vref assume value is clamped */
+    bool NernstClamped;
 };
 
 struct AnalogResult
 {
     AnalogChannelResult ch[AFR_CHANNELS];
     float VirtualGroundVoltageInt;
+    /* TODO: add SupplyVoltage - some boards can measure supply voltage */
 };
 
 AnalogResult AnalogSample();
@@ -53,13 +58,35 @@ public:
     // Actual configuration data
     union {
         struct {
-            uint8_t CanIndexOffset = 0;
+            uint8_t NoLongerUsed0 = 0;
             // AUX0 and AUX1 curves
             float auxOutBins[2][8];
             float auxOutValues[2][8];
             AuxOutputMode auxOutputSource[2];
 
             SensorType sensorType;
+
+            // per AFR channel settings
+            struct {
+                bool RusEfiTx:1;
+                bool RusEfiTxDiag:1;
+                bool AemNetTx:1;
+
+                uint8_t RusEfiIdOffset;
+                uint8_t AemNetIdOffset;
+                uint8_t pad[5];
+            } afr[2];
+
+            // per EGT channel settings
+            struct {
+                bool RusEfiTx:1;
+                bool RusEfiTxDiag:1;
+                bool AemNetTx:1;
+
+                uint8_t RusEfiIdOffset;
+                uint8_t AemNetIdOffset;
+                uint8_t pad[5];
+            } egt[2];
         } __attribute__((packed));
 
         // pad to 256 bytes including tag
@@ -72,13 +99,16 @@ Configuration* GetConfiguration();
 void SetConfiguration();
 
 /* TS stuff */
-uint8_t *GetConfiguratiuonPtr();
+uint8_t *GetConfigurationPtr();
 size_t GetConfigurationSize();
 int SaveConfiguration();
 const char *getTsSignature();
 
 void rebootNow();
 void rebootToOpenblt();
+void rebootToDfu();
+
+extern "C" void checkDfuAndJump();
 
 // LSU4.2, LSU4.9 or LSU_ADV
 SensorType GetSensorType();

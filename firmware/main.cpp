@@ -38,7 +38,9 @@ int main() {
     StartPumpControl();
     InitAuxDac();
 
+#if TS_ENABLED
     startTunerStudioConnectivity();
+#endif
 
     InitCan();
     InitUart();

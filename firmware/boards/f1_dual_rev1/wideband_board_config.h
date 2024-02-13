@@ -13,10 +13,14 @@
 #define ADC_MAX_COUNT (4095)
 #define ADC_OVERSAMPLE 16
 
+// Algo settings
+// TODO: move to settings
+#define HEATER_FAST_HEATING_THRESHOLD_T		550
+
 // *******************************
 //    Nernst voltage & ESR sense
 // *******************************
-#define NERNST_INPUT_GAIN (1 / 3.15f)
+#define NERNST_INPUT_GAIN (3.15f)
 #define NERNST_INPUT_OFFSET (0.247)
 
 // *******************************
@@ -24,13 +28,13 @@
 // *******************************
 // 100K + 10K divider
 #define BATTERY_INPUT_DIVIDER (10.0 / (10.0 + 100.0))
-#define BATTERY_FILTER_ALPHA (0.1f)
 
 // *******************************
 //     Heater low side Sensing
 // *******************************
 // 100K + 10K divider
 #define HEATER_INPUT_DIVIDER (10.0 / (10.0 + 100.0))
+#define HEATER_FILTER_ALPHA (0.1f)
 
 // *******************************
 //        Vm output Sensing

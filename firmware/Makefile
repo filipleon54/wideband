@@ -14,6 +14,8 @@ ifeq ($(USE_OPT),)
   USE_OPT = -O2 -ggdb -fomit-frame-pointer -falign-functions=16 -fsingle-precision-constant
 endif
 
+USE_OPT += -DWB_PROD=1
+
 # C specific options here (added to USE_OPT).
 ifeq ($(USE_COPT),)
   USE_COPT = 
@@ -100,6 +102,7 @@ CHIBIOS  := ChibiOS
 CONFDIR  := $(BOARDDIR)
 BUILDDIR := ./build
 DEPDIR   := ./.dep
+FIRMWARE_DIR = .
 
 ifeq ("$(wildcard $(CHIBIOS)/os/license/license.mk)","")
 # submodules probably aren't checked out, complain to the user about it!
@@ -126,12 +129,16 @@ include $(CHIBIOS)/os/hal/lib/complex/mfs/hal_mfs.mk
 # include board.mk that sets per-board options
 include $(BOARDDIR)/board.mk
 
+include wideband.mk
+
 # Define linker script file here
 LDSCRIPT=app.ld
 
 # C sources that can be compiled in ARM or THUMB mode depending on the global
 # setting.
-CSRC = $(ALLCSRC) $(BOARDDIR)/board.c
+CSRC = $(ALLCSRC) \
+        $(BOARDDIR)/board.c \
+        boards/f1_common/openblt/shared_params.c
 
 # C++ sources that can be compiled in ARM or THUMB mode depending on the global
 # setting.
@@ -139,28 +146,34 @@ CPPSRC = $(ALLCPPSRC) \
           $(BOARDDIR)/port.cpp \
           $(BOARDDIR)/port_shared.cpp \
           $(RUSEFI_LIB_CPP) \
+          $(WIDEBANDSRC) \
           shared/flash.cpp \
           can.cpp \
           can_helper.cpp \
+          can_aemnet.cpp \
           fault.cpp \
           lambda_conversion.cpp \
           pwm.cpp \
           dac.cpp \
           pump_dac.cpp \
-          sampling.cpp \
-          heater_control.cpp \
-          pid.cpp \
           pump_control.cpp \
           max3185x.cpp \
           uart.cpp \
           auxout.cpp \
-          livedata.cpp \
           indication.cpp \
-          console/binary/tunerstudio.cpp \
+          sampling_thread.cpp \
+          heater_thread.cpp \
+          main.cpp
+
+ifneq ($(ENABLE_TS),)
+CPPSRC += console/binary/tunerstudio.cpp \
           console/binary/tunerstudio_io.cpp \
           console/binary/tunerstudio_io_serial.cpp \
           console/binary/tunerstudio_commands.cpp \
-          main.cpp
+          livedata.cpp \
+
+DDEFS += -DTS_ENABLED=TRUE
+endif
 
 # List ASM source files here.
 ASMSRC = $(ALLASMSRC)
@@ -177,13 +190,14 @@ INCDIR = $(CONFDIR) \
          console/binary/ \
          boards/ \
          shared/ \
-         $(BOARDDIR)/io/
+         $(BOARDDIR)/io/ \
+         boards/f1_common/openblt
 
 # Define C warning options here.
 CWARN = -Wall -Wextra -Wundef -Wstrict-prototypes
 
 # Define C++ warning options here.
-CPPWARN = -Wall -Wextra -Wundef
+CPPWARN = -Wall -Wextra -Wundef -Werror=switch
 
 #
 # Project, target, sources and paths
@@ -226,9 +240,6 @@ ifeq ($(USE_OPENBLT),yes)
   # Reserve start of flash for OpenBLT
   USE_OPT += -Wl,--defsym=USE_BOOTLOADER=1
   DDEFS += -DUSE_OPENBLT=TRUE
-  # Shared params
-  INCDIR += boards/f1_common/openblt
-  CSRC += boards/f1_common/openblt/shared_params.c
 endif
 
 #

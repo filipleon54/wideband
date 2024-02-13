@@ -12,17 +12,22 @@
 #define WB_OPCODE_DATA 2
 #define WB_OPCODE_REBOOT 3
 
+#define WB_BL_BASE (WB_BL_HEADER << 4)
+
 // 0xEF0'0000
-#define WB_BL_ENTER ((WB_BL_HEADER << 4 + WB_OPCODE_START) << 16)
+#define WB_BL_ENTER ((WB_BL_BASE + WB_OPCODE_START) << 16)
 // 0xEF1'5A5A
-#define WB_BL_ERASE ((WB_BL_HEADER << 4 + WB_OPCODE_ERASE) << 16 + WB_ERASE_TAG)
+#define WB_BL_ERASE ((WB_BL_BASE + WB_OPCODE_ERASE) << 16 + WB_ERASE_TAG)
 // 0xEF2'0000
-#define WB_BL_DATA_BASE ((WB_BL_HEADER << 4 + WB_OPCODE_DATA) << 16)
+#define WB_BL_DATA_BASE ((WB_BL_BASE + WB_OPCODE_DATA) << 16)
 // 0xEF3'0000
-#define WB_BL_REBOOT ((WB_BL_HEADER << 4 + WB_OPCODE_REBOOT) << 16)
+#define WB_BL_REBOOT ((WB_BL_BASE + WB_OPCODE_REBOOT) << 16)
 #define WB_MSG_SET_INDEX 0xEF4'0000
 #define WB_MGS_ECU_STATUS 0xEF5'0000
 #define WB_DATA_BASE_ADDR 0x190
+
+// we transmit every 10ms
+#define WBO_TX_PERIOD_MS 10
 
 namespace wbo
 {
@@ -61,7 +66,7 @@ struct DiagData
     uint8_t pad;
 };
 
-static const char* describeFault(Fault fault) {
+static inline const char* describeFault(Fault fault) {
     switch (fault) {
         case Fault::None:
             return "OK";

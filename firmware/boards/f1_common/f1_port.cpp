@@ -5,12 +5,11 @@
 #include "hal.h"
 #include "hal_mfs.h"
 
-#if USE_OPENBLT
-/* communication with OpenBLT that is plain C, not to modify external file */
+/* communication with OpenBLT that is plain C, not to modify external file
+ * Same code used to store "DFU-requested" flag */
 extern "C" {
     #include "openblt/shared_params.h"
 };
-#endif
 
 // Storage
 // TODO: runtime detection?
@@ -54,7 +53,9 @@ void Configuration::LoadDefaults()
 {
     int i;
 
-    CanIndexOffset = 0;
+    *this = {};
+
+    NoLongerUsed0 = 0;
     sensorType = BOARD_DEFAULT_SENSOR_TYPE;
 
     /* default auxout curve is 0..5V for AFR 8.5 to 18.0
@@ -65,6 +66,28 @@ void Configuration::LoadDefaults()
     }
     auxOutputSource[0] = AuxOutputMode::Afr0;
     auxOutputSource[1] = AuxOutputMode::Afr1;
+
+    for (i = 0; i < AFR_CHANNELS; i++) {
+        // enable RusEFI protocol
+        afr[i].RusEfiTx = true;
+        afr[i].RusEfiTxDiag = true;
+        afr[i].RusEfiIdOffset = i;
+
+        // Disable AemNet
+        afr[i].AemNetTx = false;
+        afr[i].AemNetIdOffset = i;
+    }
+
+    for (i = 0; i < EGT_CHANNELS; i++) {
+        // disable RusEFI protocol - not implemented
+        afr[i].RusEfiTx = false;
+        afr[i].RusEfiTxDiag = false;
+        afr[i].RusEfiIdOffset = i;
+
+        // Enable AemNet
+        afr[i].AemNetTx = true;
+        afr[i].AemNetIdOffset = i;
+    }
 
     /* Finaly */
     Tag = ExpectedTag;
@@ -84,7 +107,7 @@ int InitConfiguration()
         return -1;
     }
 
-    err = mfsReadRecord(&mfs1, MFS_CONFIGURATION_RECORD_ID, &size, GetConfiguratiuonPtr());
+    err = mfsReadRecord(&mfs1, MFS_CONFIGURATION_RECORD_ID, &size, GetConfigurationPtr());
     if ((err != MFS_NO_ERROR) || (size != GetConfigurationSize() || !cfg.IsValid())) {
         /* load defaults */
         cfg.LoadDefaults();
@@ -106,14 +129,14 @@ void SetConfiguration()
 /* TS stuff */
 int SaveConfiguration() {
     /* TODO: handle error */
-    mfs_error_t err = mfsWriteRecord(&mfs1, MFS_CONFIGURATION_RECORD_ID, GetConfigurationSize(), GetConfiguratiuonPtr());
+    mfs_error_t err = mfsWriteRecord(&mfs1, MFS_CONFIGURATION_RECORD_ID, GetConfigurationSize(), GetConfigurationPtr());
     if (err != MFS_NO_ERROR) {
         return -1;
     }
     return 0;
 }
 
-uint8_t *GetConfiguratiuonPtr()
+uint8_t *GetConfigurationPtr()
 {
     return (uint8_t *)&cfg;
 }
@@ -139,7 +162,7 @@ void rebootNow()
 
 void rebootToOpenblt()
 {
-#if USE_OPENBLT
+#ifdef USE_OPENBLT
     /* safe to call on already inited shares area */
     SharedParamsInit();
     /* Store flag to stay in OpenBLT */
@@ -147,6 +170,40 @@ void rebootToOpenblt()
 
     rebootNow();
 #endif
+}
+
+void rebootToDfu()
+{
+    /* safe to call on already inited shares area */
+    SharedParamsInit();
+    /* Store flag to jump to DFU at main FW init */
+    SharedParamsWriteByIndex(0, 0x02);
+
+    rebootNow();
+}
+
+// stm32f10x XL-density devices
+//#define BOOTLOADER_FW_ADDRESS   0x1FFFE000
+// stm32f10x devices
+#define BOOTLOADER_FW_ADDRESS   0x1FFFF000
+
+void checkDfuAndJump()
+{
+    uint8_t val;
+    if (SharedParamsReadByIndex(0, &val) == true) {
+        if (val == 0x02) {
+            // reset flag
+            SharedParamsWriteByIndex(0, 0x00);
+
+            // AN2606 says: 2 Kbytes, starting from address 0x1FFFF000 contain the bootloader firmware.
+            // Point the PC to the System Memory reset vector (+4)
+            void (*SysMemBootJump)(void) = (void (*)(void)) (*((uint32_t *) (BOOTLOADER_FW_ADDRESS + 4)));
+            // Pick stack address from vector table
+            __set_MSP(*(__IO uint32_t*) BOOTLOADER_FW_ADDRESS);
+            SysMemBootJump();
+            while (1);
+        }
+    }
 }
 
 void ToggleESRDriver(SensorType sensor)

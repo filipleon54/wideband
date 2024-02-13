@@ -45,9 +45,10 @@ AnalogResult AnalogSample()
         .ch =
         {
             {
-                .NernstVoltage = AverageSamples(adcBuffer, 0) * NERNST_INPUT_GAIN,
+                .NernstVoltage = AverageSamples(adcBuffer, 0) * (1.0 / NERNST_INPUT_GAIN),
                 .PumpCurrentVoltage = AverageSamples(adcBuffer, 1),
-                .BatteryVoltage = 0,
+                .HeaterSupplyVoltage = 0,
+                .NernstClamped = false,
             },
         },
         .VirtualGroundVoltageInt = AverageSamples(adcBuffer, 2),
@@ -58,7 +59,7 @@ AnalogResult AnalogSample()
 // low -> 0
 // floating -> 1
 // high -> 2
-uint8_t readSelPin(ioportid_t port, iopadid_t pad)
+static uint8_t readSelPin(ioportid_t port, iopadid_t pad)
 {
     // If we pull the pin down, does the input follow?
     palSetPadMode(port, pad, PAL_MODE_INPUT_PULLDOWN);
@@ -95,7 +96,7 @@ int InitConfiguration()
     return 0;
 }
 
-static Configuration c;
+static Configuration config;
 
 Configuration* GetConfiguration()
 {
@@ -104,28 +105,28 @@ Configuration* GetConfiguration()
     // If config has been written before, use the stored configuration
     if (cfg.IsValid())
     {
-        c = cfg;
+        config = cfg;
     }
 
     // Now, override the index with a hardware-strapped option (if present)
     auto sel1 = readSelPin(ID_SEL1_PORT, ID_SEL1_PIN);
     auto sel2 = readSelPin(ID_SEL2_PORT, ID_SEL2_PIN);
 
-    // See https://github.com/mck1117/wideband/issues/11
+    // See https://github.com/mck1117/wideband/issues/11 to explain this madness
     switch (3 * sel1 + sel2) {
-        case 0: c.CanIndexOffset = 2; break;
-        case 1: c.CanIndexOffset = 0; break;
-        case 2: c.CanIndexOffset = 3; break;
-        case 3: c.CanIndexOffset = 4; break;
+        case 0: config.afr[0].RusEfiIdOffset = 2; break;
+        case 1: config.afr[0].RusEfiIdOffset = 0; break;
+        case 2: config.afr[0].RusEfiIdOffset = 3; break;
+        case 3: config.afr[0].RusEfiIdOffset = 4; break;
         case 4: /* both floating, do nothing */ break;
-        case 5: c.CanIndexOffset = 1; break;
-        case 6: c.CanIndexOffset = 5; break;
-        case 7: c.CanIndexOffset = 6; break;
-        case 8: c.CanIndexOffset = 7; break;
+        case 5: config.afr[0].RusEfiIdOffset = 1; break;
+        case 6: config.afr[0].RusEfiIdOffset = 5; break;
+        case 7: config.afr[0].RusEfiIdOffset = 6; break;
+        case 8: config.afr[0].RusEfiIdOffset = 7; break;
         default: break;
     }
 
-    return &c;
+    return &config;
 }
 
 void SetConfiguration()
@@ -136,7 +137,7 @@ void SetConfiguration()
     // Copy data to flash
     Flash::Write(
         reinterpret_cast<flashaddr_t>(&__configflash__start__),
-        reinterpret_cast<const uint8_t*>(&c),
+        reinterpret_cast<const uint8_t*>(&config),
         sizeof(Configuration)
     );
 }

@@ -11,6 +11,8 @@ FIRMWARE_DIR = ./../firmware
 RUSEFI_LIB = $(FIRMWARE_DIR)/libfirmware
 include $(RUSEFI_LIB)/util/util.mk
 
+include $(FIRMWARE_DIR)/wideband.mk
+
 # C sources that can be compiled in ARM or THUMB mode depending on the global
 # setting.
 CSRC += \
@@ -21,9 +23,13 @@ CSRC += \
 CPPSRC += \
 	$(RUSEFI_LIB_CPP) \
 	$(RUSEFI_LIB_CPP_TEST) \
+	$(WIDEBANDSRC) \
 	gtest-all.cpp \
 	gmock-all.cpp \
 	gtest_main.cpp \
+	test_stubs.cpp \
+	tests/test_sampler.cpp \
+	tests/test_heater.cpp \
 
 INCDIR += \
 	$(PROJECT_DIR)/googletest/googlemock/ \
@@ -32,6 +38,8 @@ INCDIR += \
 	$(PROJECT_DIR)/googletest/googletest/include \
 	$(RUSEFI_LIB_INC) \
 	$(FIRMWARE_DIR) \
+	$(FIRMWARE_DIR)/boards \
+	$(FIRMWARE_DIR)/util \
 
 # User may want to pass in a forced value for SANITIZE
 ifeq ($(SANITIZE),)
@@ -58,6 +66,8 @@ ifeq ($(USE_OPT),)
   USE_OPT += -Werror=missing-field-initializers
 endif
 
+USE_OPT += -DWB_PROD=0
+
 # C specific options here (added to USE_OPT).
 ifeq ($(USE_COPT),)
   USE_COPT = -std=gnu99 -fgnu89-inline
@@ -65,8 +75,10 @@ endif
 
 # C++ specific options here (added to USE_OPT).
 ifeq ($(USE_CPPOPT),)
-  USE_CPPOPT = -std=gnu++2a -fno-rtti -fno-use-cxa-atexit
+  USE_CPPOPT = -std=c++17 -fno-rtti -fno-use-cxa-atexit
 endif
+
+USE_CPPOPT += -DMOCK_TIMER
 
 # Enable address sanitizer for C++ files, but not on Windows since x86_64-w64-mingw32-g++ doesn't support it.
 # only c++ because lua does some things asan doesn't like, but don't actually cause overruns.
@@ -132,7 +144,7 @@ BIN  = $(CP) -O binary
 CWARN = -Wall -Wextra -Wstrict-prototypes -pedantic -Wmissing-prototypes -Wold-style-definition
 
 # Define C++ warning options here
-CPPWARN = -Wall -Wextra -Werror -pedantic -Wno-error=sign-compare
+CPPWARN = -Wall -Wextra -Werror -Wno-error=sign-compare
 
 #
 # Compiler settings
